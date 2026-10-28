@@ -1,0 +1,618 @@
+
+local admin = {
+    Version = "4.0",
+    Prefix = ";"
+}
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local admins = {}
+local permanentAdmins = {}
+local connections = {}
+local cooldowns = {}
+local frozen = {}
+local spinning = {}
+local jailed = {}
+local hidden = {}
+local savedStats = {}
+local savedGod = {}
+
+local aliases = {
+    cmds = "commands",
+    command = "commands",
+    h = "help",
+    tp = "goto",
+    to = "goto",
+    bringall = "bring",
+    healall = "heal",
+    killall = "kill",
+    re = "respawn",
+    refresh = "respawn",
+    ws = "speed",
+    walkspeed = "speed",
+    jp = "jump",
+    jumppower = "jump",
+    ff = "freeze",
+    unff = "unfreeze",
+    fr = "freeze",
+    unfr = "unfreeze",
+    fl = "fling",
+    sp = "speed",
+    sit = "sit",
+    unsit = "stand",
+    inv = "invisible",
+    vis = "visible",
+    unspin = "stopspin",
+    spinstop = "stopspin",
+    jail = "jail",
+    release = "unjail",
+    admin = "setadmin",
+    unadmin = "removeadmin",
+    playercount = "count",
+    listadmins = "admins",
+    godmode = "god",
+    ungodmode = "ungod",
+    explode = "boom"
+}
+
+local descriptions = {
+    commands = "List all commands",
+    help = "List all commands",
+    bring = "Bring players to you",
+    goto = "Teleport to a player",
+    heal = "Restore health",
+    kill = "Eliminate a character",
+    respawn = "Respawn a character",
+    kick = "Kick a player",
+    speed = "Set walkspeed",
+    jump = "Set jump power",
+    freeze = "Freeze players",
+    unfreeze = "Unfreeze players",
+    fling = "Launch a character",
+    spin = "Spin characters",
+    stopspin = "Stop spinning",
+    sit = "Make characters sit",
+    stand = "Make characters stand",
+    trip = "Make characters fall",
+    jail = "Create a cage",
+    unjail = "Remove a cage",
+    invisible = "Hide characters",
+    visible = "Restore visibility",
+    sparkles = "Add sparkles",
+    unsparkles = "Remove sparkles",
+    boom = "Create a harmless visual explosion",
+    god = "Enable high health",
+    ungod = "Restore normal health",
+    count = "Count players",
+    admins = "List online admins",
+    setadmin = "Grant temporary admin",
+    removeadmin = "Remove temporary admin",
+    announce = "Print a server announcement",
+    shutdown = "Shut down this server"
+}
+
+local function loadAdmins()
+    local module = script and script:FindFirstChild("Admin")
+
+    if not module or not module:IsA("ModuleScript") then
+        warn("[Reaper] script.Admin was not found")
+        return
+    end
+
+    local ok, result = pcall(require, module)
+
+    if not ok or type(result) ~= "table" then
+        warn("[Reaper] Could not load script.Admin")
+        return
+    end
+
+    for id, enabled in pairs(result) do
+        if type(id) == "number" and enabled == true then
+            admins[id] = true
+            permanentAdmins[id] = true
+        end
+    end
+end
+
+local function isAdmin(player)
+    return admins[player.UserId] == true
+end
+
+local function characterData(player)
+    if not player or not player.Character then
+        return nil
+    end
+
+    local character = player.Character
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return nil
+    end
+
+    return character, humanoid, root
+end
+
+local function findPlayer(name, executor)
+    if not name then
+        return nil
+    end
+
+    name = string.lower(name)
+
+    if name == "me" or name == "self" then
+        return executor
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if string.lower(player.Name) == name
+            or string.lower(player.DisplayName) == name then
+            return player
+        end
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if string.lower(player.Name):sub(1, #name) == name
+            or string.lower(player.DisplayName):sub(1, #name) == name then
+            return player
+        end
+    end
+
+    return nil
+end
+
+local function getTargets(selector, executor)
+    selector = string.lower(selector or "me")
+
+    if selector == "me" or selector == "self" then
+        return {executor}
+    end
+
+    local targets = {}
+
+    if selector == "all" or selector == "*" then
+        return Players:GetPlayers()
+    end
+
+    if selector == "others" then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= executor then
+                table.insert(targets, player)
+            end
+        end
+        return targets
+    end
+
+    if selector == "admins" then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if isAdmin(player) then
+                table.insert(targets, player)
+            end
+        end
+        return targets
+    end
+
+    local player = findPlayer(selector, executor)
+
+    if player then
+        table.insert(targets, player)
+    end
+
+    return targets
+end
+
+local function printCommands()
+    print("========== REAPER ADMIN v" .. admin.Version .. " ==========")
+
+    local names = {}
+
+    for name in pairs(descriptions) do
+        table.insert(names, name)
+    end
+
+    table.sort(names)
+
+    for _, name in ipairs(names) do
+        print(admin.Prefix .. name .. " - " .. descriptions[name])
+    end
+
+    print("---------- ALIASES ----------")
+
+    local aliasNames = {}
+
+    for alias in pairs(aliases) do
+        table.insert(aliasNames, alias)
+    end
+
+    table.sort(aliasNames)
+
+    for _, alias in ipairs(aliasNames) do
+        print(admin.Prefix .. alias .. " -> " .. aliases[alias])
+    end
+
+    print("Targets: me, all, others, admins, or a player name")
+    print("==============================================")
+end
+
+local function clearSpin(player)
+    local object = spinning[player.UserId]
+
+    if object then
+        object:Destroy()
+        spinning[player.UserId] = nil
+    end
+end
+
+local function freezePlayer(player, state)
+    local _, humanoid, root = characterData(player)
+
+    if not humanoid then
+        return false
+    end
+
+    if state then
+        if not frozen[player.UserId] then
+            frozen[player.UserId] = {
+                WalkSpeed = humanoid.WalkSpeed,
+                JumpPower = humanoid.JumpPower,
+                JumpHeight = humanoid.JumpHeight,
+                AutoRotate = humanoid.AutoRotate,
+                Anchored = root.Anchored,
+                UseJumpPower = humanoid.UseJumpPower
+            }
+        end
+
+        humanoid.WalkSpeed = 0
+        humanoid.JumpPower = 0
+        humanoid.JumpHeight = 0
+        humanoid.AutoRotate = false
+        root.Anchored = true
+    else
+        local old = frozen[player.UserId]
+
+        if old then
+            humanoid.WalkSpeed = old.WalkSpeed
+            humanoid.JumpPower = old.JumpPower
+            humanoid.JumpHeight = old.JumpHeight
+            humanoid.AutoRotate = old.AutoRotate
+            humanoid.UseJumpPower = old.UseJumpPower
+            root.Anchored = old.Anchored
+            frozen[player.UserId] = nil
+        end
+    end
+
+    return true
+end
+
+local function setInvisible(player, state)
+    local character = player.Character
+
+    if not character then
+        return
+    end
+
+    if state then
+        if hidden[player.UserId] then
+            return
+        end
+
+        hidden[player.UserId] = {}
+
+        for _, object in ipairs(character:GetDescendants()) do
+            if object:IsA("BasePart") or object:IsA("Decal") then
+                hidden[player.UserId][object] = object.Transparency
+                object.Transparency = 1
+            end
+        end
+    else
+        local saved = hidden[player.UserId]
+
+        if saved then
+            for object, transparency in pairs(saved) do
+                if object.Parent then
+                    object.Transparency = transparency
+                end
+            end
+
+            hidden[player.UserId] = nil
+        end
+    end
+end
+
+local function execute(executor, message)
+    if not isAdmin(executor) or type(message) ~= "string" then
+        return
+    end
+
+    if #message > 300 or message:sub(1, #admin.Prefix) ~= admin.Prefix then
+        return
+    end
+
+    local now = os.clock()
+
+    if now - (cooldowns[executor.UserId] or 0) < 0.2 then
+        return
+    end
+
+    cooldowns[executor.UserId] = now
+
+    local args = {}
+
+    for word in message:sub(#admin.Prefix + 1):gmatch("%S+") do
+        table.insert(args, word)
+    end
+
+    local command = string.lower(args[1] or "")
+    command = aliases[command] or command
+
+    if command == "commands" or command == "help" then
+        printCommands()
+        return
+    end
+
+    if command == "count" then
+        print("[Reaper] Players online: " .. #Players:GetPlayers())
+        return
+    end
+
+    if command == "admins" then
+        local names = {}
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            if isAdmin(player) then
+                table.insert(names, player.Name)
+            end
+        end
+
+        print("[Reaper] Online admins: " .. table.concat(names, ", "))
+        return
+    end
+
+    if command == "announce" then
+        if permanentAdmins[executor.UserId] then
+            print("[Reaper Announcement] " .. table.concat(args, " ", 2))
+        end
+        return
+    end
+
+    if command == "setadmin" or command == "removeadmin" then
+        if not permanentAdmins[executor.UserId] then
+            warn("[Reaper] Only original admins can manage admins")
+            return
+        end
+
+        local target = findPlayer(args[2], executor)
+
+        if not target then
+            warn("[Reaper] Player not found")
+            return
+        end
+
+        if command == "setadmin" then
+            admins[target.UserId] = true
+            print("[Reaper] Admin granted for this server: " .. target.Name)
+        else
+            if permanentAdmins[target.UserId] then
+                warn("[Reaper] Cannot remove an original admin")
+                return
+            end
+
+            admins[target.UserId] = nil
+            print("[Reaper] Admin removed: " .. target.Name)
+        end
+
+        return
+    end
+
+    if command == "shutdown" then
+        if permanentAdmins[executor.UserId] then
+            for _, player in ipairs(Players:GetPlayers()) do
+                player:Kick("Server shut down by an administrator.")
+            end
+        end
+        return
+    end
+
+    if not descriptions[command] then
+        warn("[Reaper] Unknown command: " .. command)
+        return
+    end
+
+    local targets = getTargets(args[2], executor)
+
+    if #targets == 0 then
+        warn("[Reaper] No matching targets")
+        return
+    end
+
+    for _, target in ipairs(targets) do
+        if target and target.Parent == Players then
+            local character, humanoid, root = characterData(target)
+
+            if command == "kick" then
+                target:Kick(table.concat(args, " ", 3))
+
+            elseif command == "bring" then
+                local _, _, adminRoot = characterData(executor)
+
+                if root and adminRoot then
+                    root.CFrame = adminRoot.CFrame * CFrame.new(3, 0, 0)
+                end
+
+            elseif command == "goto" then
+                local _, _, adminRoot = characterData(executor)
+
+                if root and adminRoot then
+                    adminRoot.CFrame = root.CFrame * CFrame.new(3, 0, 0)
+                end
+
+            elseif command == "heal" and humanoid then
+                humanoid.Health = humanoid.MaxHealth
+
+            elseif command == "kill" and humanoid then
+                humanoid.Health = 0
+
+            elseif command == "respawn" then
+                target:LoadCharacter()
+
+            elseif command == "speed" and humanoid then
+                local value = tonumber(args[3])
+
+                if value and value == value then
+                    humanoid.WalkSpeed = math.clamp(value, 0, 100)
+                end
+
+            elseif command == "jump" and humanoid then
+                local value = tonumber(args[3])
+
+                if value and value == value then
+                    humanoid.UseJumpPower = true
+                    humanoid.JumpPower = math.clamp(value, 0, 150)
+                end
+
+            elseif command == "freeze" then
+                freezePlayer(target, true)
+
+            elseif command == "unfreeze" then
+                freezePlayer(target, false)
+
+            elseif command == "fling" and root then
+                root.AssemblyLinearVelocity = Vector3.new(
+                    math.random(-120, 120),
+                    160,
+                    math.random(-120, 120)
+                )
+
+            elseif command == "spin" and root then
+                if not spinning[target.UserId] then
+                    local angular = Instance.new("BodyAngularVelocity")
+                    angular.Name = "ReaperSpin"
+                    angular.AngularVelocity = Vector3.new(0, 20, 0)
+                    angular.MaxTorque = Vector3.new(0, 1000000, 0)
+                    angular.Parent = root
+                    spinning[target.UserId] = angular
+                end
+
+            elseif command == "stopspin" then
+                clearSpin(target)
+
+            elseif command == "sit" and humanoid then
+                humanoid.Sit = true
+
+            elseif command == "stand" and humanoid then
+                humanoid.Sit = false
+
+            elseif command == "trip" and humanoid then
+                humanoid:ChangeState(Enum.HumanoidStateType.FallingDown)
+
+            elseif command == "jail" and root then
+                if not jailed[target.UserId] then
+                    local cage = Instance.new("Part")
+                    cage.Name = "ReaperJail"
+                    cage.Size = Vector3.new(8, 8, 8)
+                    cage.Anchored = true
+                    cage.CanCollide = true
+                    cage.Transparency = 0.4
+                    cage.CFrame = root.CFrame
+                    cage.Parent = workspace
+                    jailed[target.UserId] = cage
+                end
+
+            elseif command == "unjail" then
+                local cage = jailed[target.UserId]
+
+                if cage then
+                    cage:Destroy()
+                    jailed[target.UserId] = nil
+                end
+
+            elseif command == "invisible" then
+                setInvisible(target, true)
+
+            elseif command == "visible" then
+                setInvisible(target, false)
+
+            elseif command == "sparkles" and root then
+                if not root:FindFirstChild("ReaperSparkles") then
+                    local effect = Instance.new("Sparkles")
+                    effect.Name = "ReaperSparkles"
+                    effect.Parent = root
+                end
+
+            elseif command == "unsparkles" and root then
+                local effect = root:FindFirstChild("ReaperSparkles")
+
+                if effect then
+                    effect:Destroy()
+                end
+
+            elseif command == "boom" and root then
+                local explosion = Instance.new("Explosion")
+                explosion.Position = root.Position
+                explosion.BlastRadius = 0
+                explosion.BlastPressure = 0
+                explosion.Parent = workspace
+
+            elseif command == "god" and humanoid then
+                if not savedGod[target.UserId] then
+                    savedGod[target.UserId] = humanoid.MaxHealth
+                end
+
+                humanoid.MaxHealth = 1000000
+                humanoid.Health = humanoid.MaxHealth
+
+            elseif command == "ungod" and humanoid then
+                humanoid.MaxHealth = savedGod[target.UserId] or 100
+                humanoid.Health = math.min(humanoid.Health, humanoid.MaxHealth)
+                savedGod[target.UserId] = nil
+            end
+        end
+    end
+end
+
+function admin:Load()
+    loadAdmins()
+
+    print("[Reaper Admin] Version " .. self.Version .. " loaded")
+    --printCommands()
+
+    local function connectPlayer(player)
+        if connections[player] then
+            connections[player]:Disconnect()
+        end
+
+        connections[player] = player.Chatted:Connect(function(message)
+            execute(player, message)
+        end)
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        connectPlayer(player)
+    end
+
+    Players.PlayerAdded:Connect(connectPlayer)
+
+    Players.PlayerRemoving:Connect(function(player)
+        if connections[player] then
+            connections[player]:Disconnect()
+            connections[player] = nil
+        end
+
+        clearSpin(player)
+        cooldowns[player.UserId] = nil
+
+        local cage = jailed[player.UserId]
+        if cage then
+            cage:Destroy()
+        end
+
+        jailed[player.UserId] = nil
+        frozen[player.UserId] = nil
+        hidden[player.UserId] = nil
+        savedGod[player.UserId] = nil
+    end)
+end
+
+return admin
