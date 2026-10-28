@@ -1,6 +1,5 @@
-
 local admin = {
-    Version = "1.1",
+    Version = "1.2",
     Prefix = ";"
 }
 
@@ -13,6 +12,7 @@ local connections = {}
 local cooldowns = {}
 local frozen = {}
 local spinning = {}
+local flying = {}
 local jailed = {}
 local hidden = {}
 local savedStats = {}
@@ -53,7 +53,9 @@ local aliases = {
     listadmins = "admins",
     godmode = "god",
     ungodmode = "ungod",
-    explode = "boom"
+    explode = "boom",
+    flyme = "fly",
+    stopfly = "unfly"
 }
 
 local descriptions = {
@@ -72,6 +74,9 @@ local descriptions = {
     fling = "Launch a character",
     spin = "Spin characters",
     stopspin = "Stop spinning",
+    fly = "Fly players at a chosen speed",
+    unfly = "Stop players from flying",
+    prefix = "Change the command prefix",
     sit = "Make characters sit",
     stand = "Make characters stand",
     trip = "Make characters fall",
@@ -245,6 +250,119 @@ local function clearSpin(player)
     end
 end
 
+local function stopFly(player)
+    local data = flying[player.UserId]
+
+    if not data then
+        return
+    end
+
+    if data.connection then
+        data.connection:Disconnect()
+    end
+
+    if data.velocity then
+        data.velocity:Destroy()
+    end
+
+    if data.orientation then
+        data.orientation:Destroy()
+    end
+
+    if data.attachment then
+        data.attachment:Destroy()
+    end
+
+    if data.humanoid and data.humanoid.Parent then
+        data.humanoid.PlatformStand = data.oldPlatformStand
+        data.humanoid.AutoRotate = data.oldAutoRotate
+    end
+
+    flying[player.UserId] = nil
+end
+
+local function startFly(player, speed)
+    local character, humanoid, root = characterData(player)
+
+    if not character then
+        return false
+    end
+
+    stopFly(player)
+
+    local attachment = Instance.new("Attachment")
+    attachment.Name = "ReaperFlyAttachment"
+    attachment.Parent = root
+
+    local velocity = Instance.new("BodyVelocity")
+    velocity.Name = "ReaperFlyVelocity"
+    velocity.MaxForce = Vector3.new(1000000, 1000000, 1000000)
+    velocity.P = 1250
+    velocity.Velocity = Vector3.zero
+    velocity.Parent = root
+
+    local orientation = Instance.new("BodyGyro")
+    orientation.Name = "ReaperFlyOrientation"
+    orientation.MaxTorque = Vector3.new(1000000, 1000000, 1000000)
+    orientation.P = 10000
+    orientation.CFrame = root.CFrame
+    orientation.Parent = root
+
+    local data = {
+        attachment = attachment,
+        velocity = velocity,
+        orientation = orientation,
+        humanoid = humanoid,
+        root = root,
+        oldPlatformStand = humanoid.PlatformStand,
+        oldAutoRotate = humanoid.AutoRotate,
+        speed = speed,
+        phase = 0
+    }
+
+    flying[player.UserId] = data
+
+    humanoid.AutoRotate = false
+    humanoid.PlatformStand = true
+
+    data.connection = RunService.Heartbeat:Connect(function(dt)
+        if not player.Parent or not root.Parent or humanoid.Health <= 0 then
+            stopFly(player)
+            return
+        end
+
+        data.phase += dt
+
+        local direction = humanoid.MoveDirection
+        local vertical = 0
+
+        if direction.Magnitude > 0 then
+            velocity.Velocity = direction.Unit * data.speed
+        else
+            velocity.Velocity = Vector3.zero
+        end
+
+        if direction.Magnitude > 0.01 then
+            local flatDirection = Vector3.new(direction.X, 0, direction.Z)
+
+            if flatDirection.Magnitude > 0.01 then
+                orientation.CFrame = CFrame.lookAt(
+                    root.Position,
+                    root.Position + flatDirection.Unit
+                )
+            end
+        end
+
+        velocity.Velocity = Vector3.new(
+            velocity.Velocity.X,
+            vertical,
+            velocity.Velocity.Z
+        )
+    end)
+
+    return true
+end
+
 local function freezePlayer(player, state)
     local _, humanoid, root = characterData(player)
 
@@ -347,6 +465,19 @@ local function execute(executor, message)
     local command = string.lower(args[1] or "")
     command = aliases[command] or command
 
+    if command == "prefix" then
+        local newPrefix = args[2]
+
+        if not newPrefix or #newPrefix > 3 or newPrefix:find("%s") then
+            warn("[Reaper] Usage: " .. admin.Prefix .. "prefix <symbol>")
+            return
+        end
+
+        admin.Prefix = newPrefix
+        print("[Reaper] Prefix changed to: " .. admin.Prefix)
+        return
+    end
+
     if command == "commands" or command == "help" then
         printCommands()
         return
@@ -412,6 +543,38 @@ local function execute(executor, message)
                 player:Kick("Server shut down by an administrator.")
             end
         end
+        return
+    end
+
+    if command == "fly" or command == "unfly" then
+        local target = findPlayer(args[2], executor)
+
+        if not target then
+            warn("[Reaper] Usage: " .. admin.Prefix .. command .. " <username>" .. (command == "fly" and " <speed>" or ""))
+            return
+        end
+
+        if command == "unfly" then
+            stopFly(target)
+            print("[Reaper] Flight disabled for " .. target.Name)
+            return
+        end
+
+        local speed = tonumber(args[3]) or 50
+
+        if speed ~= speed or speed == math.huge or speed == -math.huge then
+            warn("[Reaper] Invalid flight speed")
+            return
+        end
+
+        speed = math.clamp(speed, 1, 150)
+
+        if startFly(target, speed) then
+            print("[Reaper] Flight enabled for " .. target.Name .. " at speed " .. speed)
+        else
+            warn("[Reaper] Target has no living character")
+        end
+
         return
     end
 
@@ -576,7 +739,6 @@ function admin:Load()
     loadAdmins()
 
     print("[Reaper Admin] Version " .. self.Version .. " loaded")
-    --printCommands()
 
     local function connectPlayer(player)
         if connections[player] then
@@ -585,6 +747,10 @@ function admin:Load()
 
         connections[player] = player.Chatted:Connect(function(message)
             execute(player, message)
+        end)
+
+        player.CharacterRemoving:Connect(function()
+            stopFly(player)
         end)
     end
 
@@ -600,10 +766,12 @@ function admin:Load()
             connections[player] = nil
         end
 
+        stopFly(player)
         clearSpin(player)
         cooldowns[player.UserId] = nil
 
         local cage = jailed[player.UserId]
+
         if cage then
             cage:Destroy()
         end
